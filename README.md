@@ -30,3 +30,9 @@ To make apps (Zoom, Skype, Discord) see a *real* webcam/mic on Windows:
 
 ## Build
 `./gradlew assembleDebug` (JDK 17) or push to GitHub: the workflow uploads the APK.
+
+## Two control modes
+Tap **Mode** in the app to switch (the choice is remembered).
+
+* **Mode: BT** (default, main mode): the phone pretends to be a Bluetooth keyboard/mouse/remote. Needs Android 9+ and a phone that allows the Bluetooth HID profile. Tap Visible, pair from the PC, then Connect. The app now retries registration automatically and shows what went wrong.
+* **Mode: Net** (backup, works on any phone): run `pc/phonepad_receiver.py` on the Windows PC (`run_receiver.bat`, needs only Python 3). Put phone and PC on the same Wi-Fi/hotspot or USB tethering, tap Connect in the app and type the address the script prints. Use only on a network you trust.
