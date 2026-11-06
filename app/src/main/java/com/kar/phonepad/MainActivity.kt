@@ -4,6 +4,7 @@ import android.Manifest
 import android.annotation.SuppressLint
 import android.annotation.TargetApi
 import android.app.Activity
+import android.app.AlertDialog
 import android.bluetooth.BluetoothAdapter
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -41,6 +42,8 @@ class MainActivity : Activity() {
     private val ui = Handler(Looper.getMainLooper())
     private var stickyMod = 0
     private var sens = 2f
+    private var netMode = false
+    private lateinit var modeBtn: Button
 
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
     private fun granted(p: String) = Build.VERSION.SDK_INT < 23 || checkSelfPermission(p) == PackageManager.PERMISSION_GRANTED
@@ -51,7 +54,10 @@ class MainActivity : Activity() {
         super.onCreate(b)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         buildUi()
-        if (Build.VERSION.SDK_INT < 28) status.text = "Bluetooth mouse/keyboard needs Android 9+. Camera/mic streaming still works."
+        netMode = getSharedPreferences("pp", 0).getBoolean("net", false)
+        updateModeLabel()
+        if (netMode) useNetwork()
+        else if (Build.VERSION.SDK_INT < 28) status.text = "Bluetooth mouse/keyboard needs Android 9+: tap Mode to use Network. Camera/mic streaming still works."
         else startBluetoothOrAsk()
     }
 
@@ -77,7 +83,7 @@ class MainActivity : Activity() {
         super.onRequestPermissionsResult(r, p, g)
         if (r == 1) {
             if (g.isNotEmpty() && g.all { it == PackageManager.PERMISSION_GRANTED }) useBluetooth()
-            else status.text = "Bluetooth permission denied: allow it in Settings to use mouse/keyboard"
+            else status.text = "Bluetooth permission denied: allow it in Settings, or tap Mode to use Network"
         } else if (r == 2) launchStream()
     }
 
@@ -97,6 +103,37 @@ class MainActivity : Activity() {
         hid = h; backend = h
         status.text = "Starting Bluetooth…"
         h.start()
+    }
+
+    private fun updateModeLabel() { modeBtn.text = if (netMode) "Mode: Net" else "Mode: BT" }
+
+    private fun useNetwork() {
+        closeBackend()
+        backend = NetBackend(this) { runOnUiThread { status.text = it } }
+        status.text = "Network mode: run phonepad_receiver.py on the PC, then tap Connect"
+    }
+
+    private fun toggleMode() {
+        netMode = !netMode
+        getSharedPreferences("pp", 0).edit().putBoolean("net", netMode).apply()
+        updateModeLabel()
+        if (netMode) useNetwork()
+        else if (Build.VERSION.SDK_INT < 28) { closeBackend(); status.text = "Bluetooth mouse/keyboard needs Android 9+" }
+        else startBluetoothOrAsk()
+    }
+
+    private fun askPcAddress() {
+        val nb = backend as? NetBackend ?: return
+        val et = EditText(this).apply {
+            hint = "PC address, e.g. 192.168.1.20"
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
+            setText(getSharedPreferences("pp", 0).getString("ip", ""))
+        }
+        AlertDialog.Builder(this).setTitle("PC receiver address").setView(et)
+            .setPositiveButton("Connect") { _, _ ->
+                val ip = et.text.toString().trim()
+                if (ip.isNotEmpty()) { getSharedPreferences("pp", 0).edit().putString("ip", ip).apply(); nb.connect(ip) }
+            }.setNegativeButton("Cancel", null).show()
     }
 
     @TargetApi(28)
@@ -181,6 +218,7 @@ class MainActivity : Activity() {
         status = TextView(this).apply { text = "PhonePad"; textSize = 14f }
         root.addView(status)
 
+        modeBtn = button("Mode: BT") { toggleMode() }
         panelBtn = button("Stream") {
             val showStream = streamPanel.visibility != View.VISIBLE
             streamPanel.visibility = if (showStream) View.VISIBLE else View.GONE
@@ -189,12 +227,17 @@ class MainActivity : Activity() {
         }
         root.addView(row(
             button("Visible") {
+                if (netMode) toast("Visible is only for Bluetooth mode") else
                 if (hid == null) toast("Needs Android 9+ and Bluetooth permission") else
                     startActivity(Intent(BluetoothAdapter.ACTION_REQUEST_DISCOVERABLE)
                         .putExtra(BluetoothAdapter.EXTRA_DISCOVERABLE_DURATION, 120))
             },
-            button("Connect") { if (hid == null) toast("Needs Android 9+ and Bluetooth permission") else if (Build.VERSION.SDK_INT >= 28) pickDevice() },
-            panelBtn))
+            button("Connect") {
+                if (netMode) askPcAddress()
+                else if (hid == null) toast("Needs Android 9+ and Bluetooth permission")
+                else if (Build.VERSION.SDK_INT >= 28) pickDevice()
+            },
+            modeBtn, panelBtn))
 
         // ----- pad panel -----
         padPanel = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
