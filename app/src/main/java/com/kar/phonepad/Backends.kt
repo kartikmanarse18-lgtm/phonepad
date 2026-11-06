@@ -54,11 +54,13 @@ private fun descOf(vararg parts: IntArray) = parts.flatMap { it.toList() }.map {
 
 /**
  * Real Bluetooth HID device. Needs Android 9+ (API 28).
- * tvMode = keyboard + remote keys only (smart TVs usually reject a "mouse" from a phone).
+ * profile 0 = PC (keyboard + mouse + media), 1 = TV remote (keyboard + remote keys, no cursor),
+ * 2 = TV mouse (cursor only), 3 = TV all-in-one (cursor + keyboard + remote keys).
+ * Different TVs accept different device types, so the user can pick one.
  */
 @TargetApi(28)
 @SuppressLint("MissingPermission")
-class HidBackend(private val act: Activity, private val tvMode: Boolean, private val status: (String) -> Unit) : Backend {
+class HidBackend(private val act: Activity, private val profile: Int, private val status: (String) -> Unit) : Backend {
     private var hid: BluetoothHidDevice? = null
     @Volatile private var host: BluetoothDevice? = null
     @Volatile private var registered = false
@@ -74,8 +76,15 @@ class HidBackend(private val act: Activity, private val tvMode: Boolean, private
     private val handler = Handler(Looper.getMainLooper())
     private val watchdog = Runnable { if (!registered && !closing) retry("no answer from the Bluetooth system") }
 
-    private val desc: ByteArray =
-        if (tvMode) descOf(KEYBOARD_DESC, CONSUMER_TV) else descOf(MOUSE_DESC, KEYBOARD_DESC, CONSUMER_COMBO)
+    private val hasMouse = profile != 1
+    private val hasKeyboard = profile != 2
+    private val label = when (profile) { 1 -> "TV remote"; 2 -> "TV mouse"; 3 -> "TV all-in-one"; else -> "PC" }
+    private val desc: ByteArray = when (profile) {
+        1 -> descOf(KEYBOARD_DESC, CONSUMER_TV)
+        2 -> descOf(MOUSE_DESC, CONSUMER_TV)
+        3 -> descOf(MOUSE_DESC, KEYBOARD_DESC, CONSUMER_TV)
+        else -> descOf(MOUSE_DESC, KEYBOARD_DESC, CONSUMER_COMBO)
+    }
 
     private val cb = object : BluetoothHidDevice.Callback() {
         override fun onAppStatusChanged(d: BluetoothDevice?, reg: Boolean) {
@@ -84,8 +93,8 @@ class HidBackend(private val act: Activity, private val tvMode: Boolean, private
                 if (reg) {
                     handler.removeCallbacks(watchdog)
                     registered = true; attempts = 0
-                    if (d != null) { host = d; status("Bluetooth connected: ${d.name ?: d.address}") }
-                    else status("Bluetooth ready: tap Connect (pair the PC/TV first)")
+                    if (d != null) { host = d; status("Bluetooth connected: ${d.name ?: d.address} ($label)") }
+                    else status("Bluetooth ready as \"$label\": tap Connect")
                 } else {
                     registered = false
                     // ignore the "false" that our own unregister-before-register produces
@@ -98,7 +107,7 @@ class HidBackend(private val act: Activity, private val tvMode: Boolean, private
         override fun onConnectionStateChanged(d: BluetoothDevice, s: Int) {
             act.runOnUiThread {
                 when (s) {
-                    BluetoothProfile.STATE_CONNECTED -> { host = d; status("Bluetooth connected: ${d.name ?: d.address}") }
+                    BluetoothProfile.STATE_CONNECTED -> { host = d; status("Bluetooth connected: ${d.name ?: d.address} ($label)") }
                     BluetoothProfile.STATE_CONNECTING -> status("Connecting to ${d.name ?: d.address}…")
                     BluetoothProfile.STATE_DISCONNECTED -> {
                         if (d == host || host == null) { host = null; status("Bluetooth disconnected: tap Connect") }
@@ -160,8 +169,12 @@ class HidBackend(private val act: Activity, private val tvMode: Boolean, private
         handler.postDelayed({
             if (closing) return@postDelayed
             val sdp = BluetoothHidDeviceAppSdpSettings(
-                if (tvMode) "PhonePad Remote" else "PhonePad", "Phone controller", "PhonePad",
-                if (tvMode) BluetoothHidDevice.SUBCLASS1_KEYBOARD else BluetoothHidDevice.SUBCLASS1_COMBO, desc)
+                if (profile == 0) "PhonePad" else "PhonePad $label", "Phone controller", "PhonePad",
+                when (profile) {
+                    1 -> BluetoothHidDevice.SUBCLASS1_KEYBOARD
+                    2 -> BluetoothHidDevice.SUBCLASS1_MOUSE
+                    else -> BluetoothHidDevice.SUBCLASS1_COMBO
+                }, desc)
             val ok = try { h.registerApp(sdp, null, null, act.mainExecutor, cb) }
                      catch (e: Exception) { status("Bluetooth HID error: ${e.message}"); false }
             if (ok) handler.postDelayed(watchdog, 5000) else retry("request rejected")
@@ -192,10 +205,31 @@ class HidBackend(private val act: Activity, private val tvMode: Boolean, private
         if (!registered) { status("Bluetooth HID not ready: restarting…"); restart(); return }
         val adapter = act.getSystemService(BluetoothManager::class.java)?.adapter
         val devs = adapter?.bondedDevices?.toList() ?: emptyList()
-        val labels = devs.map { it.name ?: it.address } + "🔍  Scan & pair a new device…"
-        AlertDialog.Builder(act).setTitle("Connect to")
-            .setItems(labels.toTypedArray()) { _, i -> if (i == devs.size) scanDialog() else connectTo(devs[i]) }
+        val labels = devs.map { it.name ?: it.address } + "🔍  Scan & pair a new device…" + "🗑  Forget a paired device…"
+        AlertDialog.Builder(act).setTitle("Connect to ($label)")
+            .setItems(labels.toTypedArray()) { _, i ->
+                when {
+                    i < devs.size -> connectTo(devs[i])
+                    i == devs.size -> scanDialog()
+                    else -> forgetDialog(devs)
+                }
+            }
             .show()
+    }
+
+    /** Removes a pairing so the TV/PC re-reads the device type (it caches it when first paired). */
+    private fun forgetDialog(devs: List<BluetoothDevice>) {
+        if (devs.isEmpty()) { status("No paired devices to forget"); return }
+        AlertDialog.Builder(act).setTitle("Forget which device?")
+            .setItems(devs.map { it.name ?: it.address }.toTypedArray()) { _, i ->
+                val d = devs[i]
+                val ok = try { d.javaClass.getMethod("removeBond").invoke(d) as? Boolean ?: false } catch (e: Exception) { false }
+                if (ok) status("Forgot ${d.name ?: d.address}. Also forget the phone on the TV/PC, then Scan & pair again")
+                else {
+                    status("Could not forget it here: remove it in Bluetooth settings")
+                    try { act.startActivity(Intent(android.provider.Settings.ACTION_BLUETOOTH_SETTINGS)) } catch (e: Exception) {}
+                }
+            }.show()
     }
 
     private fun connectTo(d: BluetoothDevice) {
@@ -289,12 +323,12 @@ class HidBackend(private val act: Activity, private val tvMode: Boolean, private
     }
 
     private fun m(w: Int, dx: Int, dy: Int) {
-        if (tvMode) return                                   // no mouse in TV mode
+        if (!hasMouse) return
         send(1, byteArrayOf(btn.toByte(), dx.toByte(), dy.toByte(), w.toByte()))
     }
 
     override fun mouse(dx: Int, dy: Int, w: Int) {
-        if (tvMode) {                                        // scroll strip -> up/down keys
+        if (!hasMouse) {                                     // scroll strip -> up/down keys
             if (w != 0) repeat(min(abs(w), 3)) { key(if (w > 0) 0x52 else 0x51) }
             return
         }
@@ -307,6 +341,7 @@ class HidBackend(private val act: Activity, private val tvMode: Boolean, private
     override fun buttons(mask: Int) { btn = mask and 7; m(0, 0, 0) }
     override fun click(b: Int) { val keep = btn; btn = keep or b; m(0, 0, 0); btn = keep; m(0, 0, 0) }
     override fun key(code: Int, mod: Int) {
+        if (!hasKeyboard) { warn("The \"$label\" device type has no keyboard: change it in settings"); return }
         send(2, byteArrayOf(mod.toByte(), 0, code.toByte(), 0, 0, 0, 0, 0))
         send(2, ByteArray(8))
     }

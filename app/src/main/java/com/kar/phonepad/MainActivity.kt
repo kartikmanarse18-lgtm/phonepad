@@ -106,7 +106,7 @@ class MainActivity : Activity() {
     @TargetApi(28)
     private fun useBluetooth() {
         closeBackend()
-        val h = HidBackend(this, tvMode) { runOnUiThread { status.text = it } }
+        val h = HidBackend(this, profile) { runOnUiThread { status.text = it } }
         hid = h; backend = h
         status.text = "Starting Bluetooth…"
         h.start()
@@ -197,7 +197,8 @@ class MainActivity : Activity() {
     private var sensP = 30
     private var scrollP = 5
     private var natural = true
-    private var tvMode = false
+    private var tvMode = false      // pad swipes act as arrow keys (profile 1)
+    private var profile = 0         // 0 PC, 1 TV remote, 2 TV mouse, 3 TV all-in-one
     private lateinit var leftB: Button
     private lateinit var midB: Button
     private lateinit var rightB: Button
@@ -294,6 +295,25 @@ class MainActivity : Activity() {
         when (b) { 1 -> sendKey(0x28); 2 -> sendKey(0x29); 4 -> backend?.media(16) }
     }
 
+    private val profileNames = arrayOf(
+        "PC (keyboard + mouse + media)", "TV remote (arrow keys, no cursor)",
+        "TV mouse (cursor only)", "TV all-in-one (cursor + keyboard + remote keys)")
+
+    /** Different TVs accept different device types: try them in order if one shows nothing. */
+    private fun showProfileDialog() {
+        AlertDialog.Builder(this).setTitle("Device type").setSingleChoiceItems(profileNames, profile) { d, i ->
+            d.dismiss()
+            profile = i; tvMode = i == 1
+            getSharedPreferences("pp", 0).edit().putInt("profile", i).apply()
+            applyTvMode()
+            if (!netMode && Build.VERSION.SDK_INT >= 28) startBluetoothOrAsk()
+            AlertDialog.Builder(this).setTitle("Pair again")
+                .setMessage("The TV/PC remembers the device type from the first pairing. Tap Connect, choose " +
+                    "\"Forget a paired device\" for it, also forget the phone on the TV/PC, then Scan & pair again.")
+                .setPositiveButton("OK", null).show()
+        }.setNegativeButton("Cancel", null).show()
+    }
+
     private fun showSettings() {
         val sp = getSharedPreferences("pp", 0)
         val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(20), dp(12), dp(20), dp(4)) }
@@ -314,12 +334,9 @@ class MainActivity : Activity() {
             text = "Natural scrolling (content follows finger)"; isChecked = natural
             setOnCheckedChangeListener { _, c -> natural = c; sp.edit().putBoolean("natural", c).apply() }
         })
-        box.addView(CheckBox(this).apply {
-            text = "TV mode: swipes = arrow keys, tap = OK (for smart TVs)"; isChecked = tvMode
-            setOnCheckedChangeListener { _, c ->
-                tvMode = c; sp.edit().putBoolean("tv", c).apply(); applyTvMode()
-                if (!netMode && Build.VERSION.SDK_INT >= 28) startBluetoothOrAsk()
-            }
+        box.addView(Button(this).apply {
+            text = "Device type: " + profileNames[profile]; isAllCaps = false
+            setOnClickListener { showProfileDialog() }
         })
         AlertDialog.Builder(this).setTitle("Touchpad settings").setView(box).setPositiveButton("Done", null).show()
     }
@@ -330,7 +347,8 @@ class MainActivity : Activity() {
         sensP = sp.getInt("sens", 30); sens = 0.5f + sensP / 20f
         scrollP = sp.getInt("scroll", 5); scrollSpeed = 0.5f + scrollP / 10f
         natural = sp.getBoolean("natural", true)
-        tvMode = sp.getBoolean("tv", false)
+        profile = sp.getInt("profile", if (sp.getBoolean("tv", false)) 1 else 0)
+        tvMode = profile == 1
         window.statusBarColor = cBg; window.navigationBarColor = cBg
 
         val root = LinearLayout(this).apply {
